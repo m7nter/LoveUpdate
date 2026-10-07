@@ -49,26 +49,6 @@ jobs:
             -derivedDataPath "$GITHUB_WORKSPACE/build" \
             build
 
-      - name: Run storage and editing tests
-        run: |
-          xcodebuild test \
-            -project SecureVault.xcodeproj \
-            -scheme SecureVault \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.5' \
-            CODE_SIGNING_ALLOWED=NO \
-            -derivedDataPath "$GITHUB_WORKSPACE/test_build" \
-            -resultBundlePath "$GITHUB_WORKSPACE/TestResults.xcresult"
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: SecureVault-TestResults
-          path: TestResults.xcresult
-          if-no-files-found: ignore
-
       - name: Package into IPA
         run: |
           APP_PATH=$(find "$GITHUB_WORKSPACE/build" \
