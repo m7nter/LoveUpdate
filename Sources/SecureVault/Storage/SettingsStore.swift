@@ -44,6 +44,9 @@ class SettingsStore: ObservableObject {
     @Published var blackScreenEnabled: Bool = UserDefaults.standard.bool(forKey: "blackScreenEnabled") {
         didSet { UserDefaults.standard.set(blackScreenEnabled, forKey: "blackScreenEnabled") }
     }
+    @Published var annotationColor: String = UserDefaults.standard.string(forKey: "annotationColor") ?? "red" {
+        didSet { UserDefaults.standard.set(annotationColor, forKey: "annotationColor") }
+    }
 
     @Published var avatarImage: UIImage? {
         didSet { saveAvatar() }
@@ -158,7 +161,7 @@ class SettingsStore: ObservableObject {
         avatarImage = nil
         notesOnExport = false; numberingMode = "off"
         foldersEnabled = false; workModes = ["0.5", "1", "2"]; activeWorkMode = "0.5"
-        photosPerEvent = 1; blackScreenEnabled = false
+        photosPerEvent = 1; blackScreenEnabled = false; annotationColor = "red"
         showCrosshair = false; crosshairColor = "white"; crosshairOnPhoto = false
         autoLockTimeout = 0; lockOnBackground = true
         accuracyProtectionEnabled = false; accuracyThreshold = 20

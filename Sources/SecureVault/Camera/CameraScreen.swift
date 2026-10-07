@@ -134,15 +134,17 @@ struct CameraScreen: View {
                             ForEach(settings.workModes, id: \.self) { Text($0).tag($0) }
                         }.pickerStyle(.menu).padding(.horizontal)
                     }
-                    HStack {
-                        Text(String(format: "%.2f×", cameraVM.zoom)).monospacedDigit()
-                        Slider(value: Binding(get: { cameraVM.zoom }, set: { cameraVM.setZoom($0) }), in: cameraVM.minimumZoom...max(cameraVM.minimumZoom + 0.001, cameraVM.maximumZoom))
+                    HStack(spacing: 18) {
                         ForEach([0.5, 1.0, 2.0], id: \.self) { factor in
                             if factor >= cameraVM.minimumZoom && factor <= cameraVM.maximumZoom {
-                                Button(String(format: "%g×", factor)) { cameraVM.setZoom(factor) }
+                                Button(String(format: "%g×", factor)) { cameraVM.setZoom(factor, animated: true) }
+                                    .foregroundColor(abs(cameraVM.zoom - factor) < 0.1 ? .orange : .white)
                             }
                         }
-                    }.foregroundColor(.white).padding(.horizontal)
+                        Spacer()
+                        Text(String(format: "%.1f×", cameraVM.zoom)).monospacedDigit()
+                            .foregroundColor(.white)
+                    }.padding(.horizontal)
                     if cameraVM.minimumZoom > 0.5 {
                         Text("Объектив 0.5× недоступен на этом устройстве").font(.caption2).foregroundColor(.secondary)
                     }
@@ -201,6 +203,7 @@ struct CameraScreen: View {
                     HStack {
                         Button("Отмена") { dismiss() }
                             .foregroundColor(.white.opacity(0.8))
+                            .disabled(cameraVM.isCapturing)
                         Spacer()
                         if cameraVM.quickMode {
                             Text("Быстрый режим")

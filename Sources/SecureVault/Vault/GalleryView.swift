@@ -6,9 +6,21 @@ private struct PhotoEventGroup: Identifiable {
     let urls: [URL]
 }
 
+private struct GalleryRecord {
+    let url: URL
+    let meta: PhotoMeta?
+    let date: Date
+    let folder: String
+    let eventKey: String
+}
+
 struct GalleryView: View {
     @Environment(\.dismiss) var dismiss
     @State private var groupedPhotos: [PhotoEventGroup] = []
+    @State private var photoTitles: [URL: String] = [:]
+    @State private var eventKeys: [URL: String] = [:]
+    @State private var photoDates: [URL: Date] = [:]
+    @State private var reloadID = UUID()
     @State private var selectedURL: URL?
     @State private var showSettings = false
     @State private var sharingItems: [Any] = []
@@ -59,6 +71,7 @@ struct GalleryView: View {
                                     ForEach(urls, id: \.self) { url in
                                         ThumbnailCell(
                                             url: url,
+                                            title: photoTitles[url] ?? url.deletingPathExtension().lastPathComponent,
                                             isSelecting: isSelecting,
                                             isSelected: selectedURLs.contains(url)
                                         )
@@ -201,6 +214,7 @@ struct GalleryView: View {
             }
         }
         .onAppear { reload() }
+        .onDisappear { reloadID = UUID() }
         .sheet(item: $selectedURL) { url in
             let flat = groupedPhotos.flatMap { $0.urls }
             let idx = flat.firstIndex(of: url) ?? 0
@@ -229,8 +243,8 @@ struct GalleryView: View {
     }
 
     private func toggleSelection(_ url: URL) {
-        let key = FileStorageManager.shared.eventKey(for: url)
-        let eventURLs = groupedPhotos.flatMap { $0.urls }.filter { FileStorageManager.shared.eventKey(for: $0) == key }
+        let key = eventKeys[url] ?? url.path
+        let eventURLs = groupedPhotos.flatMap { $0.urls }.filter { eventKeys[$0] == key }
         if selectedURLs.contains(url) {
             selectedURLs.subtract(eventURLs)
         } else {
@@ -251,7 +265,7 @@ struct GalleryView: View {
     }
 
     private func shareSelected() {
-        let urls = selectedURLs.sorted { FileStorageManager.shared.photoDate($0) < FileStorageManager.shared.photoDate($1) }
+        let urls = selectedURLs.sorted { (photoDates[$0] ?? .distantPast) < (photoDates[$1] ?? .distantPast) }
         guard !urls.isEmpty, !isExporting else { return }
         let notes = settings.notesOnExport
         let numbering = settings.numberingMode
@@ -318,39 +332,57 @@ struct GalleryView: View {
     }
 
     private func reload() {
-        let storage = FileStorageManager.shared
-        let all = storage.loadAll()
-        let names = Set(["Без режима"] + settings.workModes + all.map { storage.folder(for: $0) })
-        folders = names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map { name in
-            (name, all.filter { storage.folder(for: $0) == name }.count)
-        }
-        let urls = all.filter { storage.folder(for: $0) == currentFolder }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ru_RU")
-        formatter.dateFormat = "d MMMM yyyy"
-
-        var dict: [String: [URL]] = [:]
-        var order: [String] = []
-
-        for url in urls {
-            let key = storage.eventKey(for: url)
-            if dict[key] == nil {
-                dict[key] = []
-                order.append(key)
+        let requestID = UUID()
+        reloadID = requestID
+        let folder = currentFolder
+        let modes = settings.workModes
+        let numberingMode = settings.numberingMode
+        let generation = accessGeneration
+        DispatchQueue.global(qos: .userInitiated).async {
+            let storage = FileStorageManager.shared
+            let records = storage.loadAllWithMeta().map { url, meta in
+                GalleryRecord(url: url, meta: meta,
+                    date: meta?.date ?? (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast,
+                    folder: storage.folder(for: url), eventKey: meta?.eventID?.uuidString ?? url.path)
             }
-            dict[key]?.append(url)
-        }
-
-        groupedPhotos = order.map { key in
-            let members = (dict[key] ?? []).sorted {
-                (storage.loadMeta(for: $0)?.eventIndex ?? 1) < (storage.loadMeta(for: $1)?.eventIndex ?? 1)
+            var counts: [String: Int] = [:]
+            var titles: [URL: String] = [:]
+            var keys: [URL: String] = [:]
+            var dates: [URL: Date] = [:]
+            var events: [String: [GalleryRecord]] = [:]
+            var order: [String] = []
+            for record in records {
+                counts[record.folder, default: 0] += 1
+                titles[record.url] = storage.title(for: record.url, meta: record.meta, numberingMode: numberingMode)
+                keys[record.url] = record.eventKey
+                dates[record.url] = record.date
+                if record.folder == folder {
+                    if events[record.eventKey] == nil { order.append(record.eventKey) }
+                    events[record.eventKey, default: []].append(record)
+                }
             }
-            let first = members[0]
-            let meta = storage.loadMeta(for: first)
-            let eventTitle = meta?.eventNumber.map { "Событие \($0)" } ?? "Отдельный снимок"
-            let title = formatter.string(from: storage.photoDate(first)) + " · " + eventTitle
-                + " · \(members.count)/\(meta?.eventCount ?? members.count)"
-            return PhotoEventGroup(id: key, title: title, urls: members)
+            let names = Set(["Без режима"] + modes + Array(counts.keys))
+            let folderRows = names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+                .map { ($0, counts[$0] ?? 0) }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "ru_RU")
+            formatter.dateFormat = "d MMMM yyyy"
+            let groups = order.compactMap { key -> PhotoEventGroup? in
+                guard let members = events[key]?.sorted(by: { ($0.meta?.eventIndex ?? 1) < ($1.meta?.eventIndex ?? 1) }),
+                      let first = members.first else { return nil }
+                let eventTitle = first.meta?.eventNumber.map { "Событие \($0)" } ?? "Отдельный снимок"
+                let title = formatter.string(from: first.date) + " · " + eventTitle
+                    + " · \(members.count)/\(first.meta?.eventCount ?? members.count)"
+                return PhotoEventGroup(id: key, title: title, urls: members.map { $0.url })
+            }
+            DispatchQueue.main.async {
+                guard self.reloadID == requestID, VaultGate.shared.generation == generation else { return }
+                self.folders = folderRows
+                self.groupedPhotos = groups
+                self.photoTitles = titles
+                self.eventKeys = keys
+                self.photoDates = dates
+            }
         }
     }
 
@@ -374,9 +406,20 @@ extension URL: Identifiable { public var id: String { absoluteString } }
 
 struct ThumbnailCell: View {
     let url: URL
+    let title: String
     var isSelecting: Bool = false
     var isSelected: Bool = false
     @State private var image: UIImage?
+    @State private var loadTicket = UUID()
+    @State private var loadOperation: BlockOperation?
+    private let accessGeneration = VaultGate.shared.generation
+    private static let queue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "SecureVault.thumbnails"
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -400,14 +443,31 @@ struct ThumbnailCell: View {
                     .padding(6)
             }
         }
-        Text(FileStorageManager.shared.title(for: url))
+        Text(title)
             .font(.caption2).foregroundColor(.white).lineLimit(3)
             .frame(width: 110, alignment: .leading)
         }
         .onAppear {
-            if image == nil {
-                image = FileStorageManager.shared.loadImage(at: url)
+            guard image == nil else { return }
+            let ticket = UUID()
+            loadTicket = ticket
+            let url = self.url
+            let generation = accessGeneration
+            loadOperation?.cancel()
+            let operation = BlockOperation()
+            operation.addExecutionBlock { [weak operation] in
+                guard operation?.isCancelled == false else { return }
+                let thumbnail = FileStorageManager.shared.loadThumbnail(at: url, generation: generation)
+                guard operation?.isCancelled == false else { return }
+                DispatchQueue.main.async {
+                    guard self.loadTicket == ticket, VaultGate.shared.generation == generation else { return }
+                    self.image = thumbnail
+                    self.loadOperation = nil
+                }
             }
+            loadOperation = operation
+            Self.queue.addOperation(operation)
         }
+        .onDisappear { loadOperation?.cancel(); loadOperation = nil; loadTicket = UUID(); image = nil }
     }
 }

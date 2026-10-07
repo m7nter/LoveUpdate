@@ -1,5 +1,6 @@
 import UIKit
 import CoreLocation
+import ImageIO
 
 struct CaptureContext: Codable {
     var eventID: UUID
@@ -28,23 +29,44 @@ struct PhotoMeta: Codable {
 }
 
 final class FileStorageManager {
-    static let shared = FileStorageManager()
+    static let shared = FileStorageManager(migrationInBackground: true)
     private let lock = NSRecursiveLock()
     private let fm = FileManager.default
     private let directory: URL?
     private let defaults: UserDefaults
+    private let thumbnailCache = NSCache<NSString, UIImage>()
+    private var eraseObserver: NSObjectProtocol?
     private var cachedLatestURL: URL?
+    private var cachedLatestLocation: CLLocation?
+    private var cachedLatestResolved = false
     private var vaultDirectory: URL {
         directory ?? fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("VaultPhotos")
     }
 
-    init(directory: URL? = nil, defaults: UserDefaults = .standard) {
+    init(directory: URL? = nil, defaults: UserDefaults = .standard, migrationInBackground: Bool = false) {
         self.directory = directory
         self.defaults = defaults
+        thumbnailCache.totalCostLimit = 32 * 1024 * 1024
+        eraseObserver = NotificationCenter.default.addObserver(forName: .vaultWillErase, object: nil, queue: nil) { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock(); defer { self.lock.unlock() }
+            self.cachedLatestURL = nil
+            self.cachedLatestLocation = nil
+            self.cachedLatestResolved = false
+            self.thumbnailCache.removeAllObjects()
+        }
         try? VaultGate.shared.withAccess {
             try fm.createDirectory(at: vaultDirectory, withIntermediateDirectories: true)
+        }
+        if migrationInBackground {
+            DispatchQueue.global(qos: .utility).async { [weak self] in self?.backfillNumbers() }
+        } else {
             backfillNumbers()
         }
+    }
+
+    deinit {
+        if let eraseObserver { NotificationCenter.default.removeObserver(eraseObserver) }
     }
 
     static func dayKey(_ date: Date) -> String {
@@ -103,22 +125,39 @@ final class FileStorageManager {
             do { try saveMeta(meta, for: url) }
             catch { try? fm.removeItem(at: url); throw error }
             cachedLatestURL = nil
+            cachedLatestLocation = nil
+            cachedLatestResolved = false
             return url
         } catch { return nil }
     }
 
-    private func loadAllUnlocked() -> [URL] {
+    private func loadAllWithMetaUnlocked() -> [(URL, PhotoMeta?)] {
         lock.lock(); defer { lock.unlock() }
         guard let enumerator = fm.enumerator(at: vaultDirectory, includingPropertiesForKeys: [.creationDateKey], options: .skipsHiddenFiles) else { return [] }
         let urls = enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "jpg" }
-        let dates = Dictionary(uniqueKeysWithValues: urls.map { ($0, photoDate($0)) })
-        let result = urls.sorted {
-            let a = dates[$0] ?? .distantPast, b = dates[$1] ?? .distantPast
-            return a == b ? $0.path < $1.path : a > b
+        let records = urls.map { url -> (url: URL, meta: PhotoMeta?, date: Date) in
+            let meta = loadMetaUnlocked(for: url)
+            let date = meta?.date ?? (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+            return (url, meta, date)
         }
-        cachedLatestURL = result.first
-        return result
+        let result = records.sorted {
+            $0.date == $1.date ? $0.url.path < $1.url.path : $0.date > $1.date
+        }
+        cachedLatestURL = result.first?.url
+        if let meta = result.first?.meta { cachedLatestLocation = Self.location(from: meta) }
+        else { cachedLatestLocation = nil }
+        cachedLatestResolved = true
+        return result.map { ($0.url, $0.meta) }
     }
+
+    private static func location(from meta: PhotoMeta) -> CLLocation? {
+        guard meta.hasLocation != false,
+              meta.hasLocation == true || meta.latitude != 0 || meta.longitude != 0,
+              CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: meta.latitude, longitude: meta.longitude)) else { return nil }
+        return CLLocation(latitude: meta.latitude, longitude: meta.longitude)
+    }
+
+    private func loadAllUnlocked() -> [URL] { loadAllWithMetaUnlocked().map { $0.0 } }
 
     func photoDate(_ url: URL) -> Date {
         loadMeta(for: url)?.date ?? (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
@@ -126,6 +165,31 @@ final class FileStorageManager {
     func loadImage(at url: URL) -> UIImage? {
         guard let data = decryptedData(for: url) else { return nil }
         return UIImage(data: data)
+    }
+    // Gallery cells request this from a small background queue. Only the
+    // downsampled image is retained; full-resolution JPEGs stay encrypted.
+    func loadThumbnail(at url: URL, maxPixelSize: Int = 320, generation: Int? = nil) -> UIImage? {
+        let cacheKey = "\(url.path):\(maxPixelSize)" as NSString
+        guard let payload = try? VaultGate.shared.withAccess(generation: generation, {
+            () -> (cached: UIImage?, data: Data?) in
+            lock.lock(); defer { lock.unlock() }
+            if let cached = thumbnailCache.object(forKey: cacheKey) { return (cached, nil) }
+            return (nil, decryptedDataUnlocked(for: url))
+        }) else { return nil }
+        if let cached = payload.cached { return cached }
+        guard let data = payload.data,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+              ] as CFDictionary) else { return nil }
+        let image = UIImage(cgImage: cgImage)
+        guard (try? VaultGate.shared.withAccess(generation: generation) {
+            thumbnailCache.setObject(image, forKey: cacheKey, cost: cgImage.bytesPerRow * cgImage.height)
+            return true
+        }) == true else { return nil }
+        return image
     }
     private func decryptedDataUnlocked(for url: URL) -> Data? {
         guard let raw = try? Data(contentsOf: url) else { return nil }
@@ -142,20 +206,29 @@ final class FileStorageManager {
         guard let encrypted = CryptoManager.encrypt(data) else { throw CocoaError(.fileWriteUnknown) }
         try encrypted.write(to: metaURL(for: url), options: .atomic)
     }
-    func loadAllWithMeta() -> [(URL, PhotoMeta?)] { loadAll().map { ($0, loadMeta(for: $0)) } }
+    func loadAllWithMeta() -> [(URL, PhotoMeta?)] {
+        (try? VaultGate.shared.withAccess { loadAllWithMetaUnlocked() }) ?? []
+    }
     func lastPhotoLocation() -> CLLocation? {
         try? VaultGate.shared.withAccess { () -> CLLocation? in
             lock.lock(); defer { lock.unlock() }
-            if let url = cachedLatestURL, !fm.fileExists(atPath: url.path) { cachedLatestURL = nil }
-            if cachedLatestURL == nil { cachedLatestURL = loadAll().first }
-            guard let url = cachedLatestURL, let m = loadMeta(for: url), m.hasLocation != false else { return nil }
-            return CLLocation(latitude: m.latitude, longitude: m.longitude)
+            if let url = cachedLatestURL, !fm.fileExists(atPath: url.path) {
+                cachedLatestURL = nil
+                cachedLatestLocation = nil
+                cachedLatestResolved = false
+            }
+            if !cachedLatestResolved { _ = loadAllWithMetaUnlocked() }
+            return cachedLatestLocation
         }
     }
     private func overwriteUnlocked(image: UIImage, at url: URL) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard let jpeg = image.jpegData(compressionQuality: 0.92), let encrypted = CryptoManager.encrypt(jpeg) else { return false }
-        do { try encrypted.write(to: url, options: .atomic); return true } catch { return false }
+        do {
+            try encrypted.write(to: url, options: .atomic)
+            thumbnailCache.removeAllObjects()
+            return true
+        } catch { return false }
     }
     private func updateNoteUnlocked(for url: URL, note: String) throws {
         lock.lock(); defer { lock.unlock() }
@@ -180,9 +253,12 @@ final class FileStorageManager {
         }
     }
     func title(for url: URL) -> String {
-        guard let meta = loadMeta(for: url) else { return url.deletingPathExtension().lastPathComponent }
+        title(for: url, meta: loadMeta(for: url), numberingMode: SettingsStore.shared.numberingMode)
+    }
+    func title(for url: URL, meta: PhotoMeta?, numberingMode: String) -> String {
+        guard let meta else { return url.deletingPathExtension().lastPathComponent }
         var parts: [String] = []
-        let mode = SettingsStore.shared.numberingMode
+        let mode = numberingMode
         if (mode == "daily" || mode == "both"), let n = meta.dailyNumber { parts.append("За день №\(n)") }
         if (mode == "total" || mode == "both"), let n = meta.totalNumber { parts.append("Общий №\(n)") }
         if let event = meta.eventNumber { parts.append("Событие \(event) · \(meta.eventIndex ?? 1)/\(meta.eventCount ?? 1)") }
@@ -204,7 +280,7 @@ final class FileStorageManager {
     // Moving a member always moves its entire event, including sidecars.
     private func moveEventsUnlocked(containing urls: [URL], to folder: String) throws {
         lock.lock(); defer { lock.unlock() }
-        defer { cachedLatestURL = nil }
+        defer { cachedLatestURL = nil; cachedLatestLocation = nil; cachedLatestResolved = false; thumbnailCache.removeAllObjects() }
         guard Self.validFolder(folder) else { throw CocoaError(.fileWriteInvalidFileName) }
         let keys = Set(urls.map { eventKey(for: $0) })
         let members = loadAll().filter { keys.contains(eventKey(for: $0)) }
@@ -237,7 +313,7 @@ final class FileStorageManager {
     }
     private func deleteUnlocked(url: URL) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        defer { cachedLatestURL = nil }
+        defer { cachedLatestURL = nil; cachedLatestLocation = nil; cachedLatestResolved = false; thumbnailCache.removeAllObjects() }
         do {
             try fm.removeItem(at: url)
             if fm.fileExists(atPath: metaURL(for: url).path) { try fm.removeItem(at: metaURL(for: url)) }
@@ -270,14 +346,22 @@ final class FileStorageManager {
     }
 
     private func backfillNumbers() {
+        let generation = VaultGate.shared.generation
         for url in loadAll().reversed() {
-            guard decryptedData(for: url) != nil else { continue }
-            if fm.fileExists(atPath: metaURL(for: url).path), loadMeta(for: url) == nil { continue }
-            var meta = loadMeta(for: url) ?? PhotoMeta(latitude: 0, longitude: 0, date: photoDate(url), hasLocation: false)
-            if meta.totalNumber != nil && meta.dailyNumber != nil { continue }
-            let numbers = allocateNumbers(date: meta.date)
-            meta.dailyNumber = numbers.0; meta.totalNumber = numbers.1
-            try? saveMeta(meta, for: url)
+            guard let _ = try? VaultGate.shared.withAccess(generation: generation, {
+                lock.lock(); defer { lock.unlock() }
+                let existing = loadMetaUnlocked(for: url)
+                if fm.fileExists(atPath: metaURL(for: url).path), existing == nil { return false }
+                var meta = existing ?? PhotoMeta(latitude: 0, longitude: 0,
+                    date: (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast,
+                    hasLocation: false)
+                if meta.totalNumber != nil && meta.dailyNumber != nil { return true }
+                guard decryptedDataUnlocked(for: url) != nil else { return false }
+                let numbers = allocateNumbers(date: meta.date)
+                meta.dailyNumber = numbers.0; meta.totalNumber = numbers.1
+                try? saveMeta(meta, for: url)
+                return true
+            }) else { break }
         }
     }
 }

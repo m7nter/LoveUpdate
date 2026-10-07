@@ -7,15 +7,17 @@ struct WatermarkRenderer {
                       heading: CLHeading?,
                       labelText: String? = nil) -> UIImage {
 
-        guard let normalized = image.normalized() else { return image }
-        let size = normalized.size
+        // UIImage.size is the displayed size and draw(in:) applies its EXIF
+        // orientation. Draw into the final bitmap once to preserve the camera's
+        // aspect ratio without keeping a second full-resolution copy in memory.
+        let size = image.size
 
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
+        format.scale = image.scale
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: size, format: format)
         let result = renderer.image { _ in
-            normalized.draw(at: .zero)
+            image.draw(in: CGRect(origin: .zero, size: size))
 
             let padding: CGFloat = size.width * 0.03
             let font = UIFont.monospacedSystemFont(

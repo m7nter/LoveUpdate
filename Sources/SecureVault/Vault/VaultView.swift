@@ -11,11 +11,11 @@ struct VaultView: View {
     @State private var showGallery = false
     @State private var showMap = false
     @State private var showNotes = false
-    @State private var showSettings = false
     @State private var showVaultLock = false
     @State private var pendingDestination: Destination?
     @State private var openedViaURL = false
     @State private var saveError = false
+    @State private var isSavingQuickPhoto = false
     var onLock: () -> Void
 
     var body: some View {
@@ -33,7 +33,6 @@ struct VaultView: View {
                         VaultActionButton(icon: "map.fill", label: "Карта меток") { requestAccess(to: .map) }
                         VaultActionButton(icon: "note.text", label: "Дневник") { requestAccess(to: .notes) }
                     }
-                    Button("Настройки") { showSettings = true }.foregroundColor(.orange)
                     Button("Калькулятор", action: onLock).foregroundColor(.gray)
                 }
             }.navigationBarHidden(true)
@@ -48,24 +47,38 @@ struct VaultView: View {
         }) {
             Group {
                 if showEditor, let image = capturedImage {
-                    PhotoEditorView(image: image, location: capturedLocation, heading: capturedHeading, onSave: { result in
-                        guard save(result) else { return false }
-                        showEditor = false; capturedImage = nil
-                        if cameraVM.event == nil { showCamera = false }
-                        return true
+                    PhotoEditorView(image: image, location: capturedLocation, heading: capturedHeading, onSave: { result, complete in
+                        save(result) { saved in
+                            complete(saved)
+                            if saved {
+                                showEditor = false; capturedImage = nil
+                                if cameraVM.event == nil { showCamera = false }
+                            }
+                        }
                     }, onDiscard: {
                         showEditor = false; capturedImage = nil
                     })
                 } else {
                     CameraScreen(cameraVM: cameraVM, onCapture: receivePhoto)
+                        .overlay {
+                            if isSavingQuickPhoto {
+                                ProgressView("Сохранение фото…")
+                                    .padding(20)
+                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                            }
+                        }
                 }
             }
             .alert("Фото не сохранено", isPresented: $saveError) {
                 Button("Повторить сохранение") {
-                    if let image = capturedImage, save(image) {
-                        capturedImage = nil
-                        if cameraVM.event == nil { showCamera = false }
-                    } else { saveError = true }
+                    if let image = capturedImage {
+                        save(image) { saved in
+                            if saved {
+                                capturedImage = nil
+                                if cameraVM.event == nil { showCamera = false }
+                            } else { saveError = true }
+                        }
+                    }
                 }
                 Button("Отбросить кадр", role: .destructive) { capturedImage = nil }
             } message: { Text("Проверьте свободное место. Кадр события не засчитан.") }
@@ -73,7 +86,6 @@ struct VaultView: View {
         .fullScreenCover(isPresented: $showGallery) { GalleryView() }
         .fullScreenCover(isPresented: $showNotes) { NotesListView() }
         .fullScreenCover(isPresented: $showMap) { PhotoMapView() }
-        .sheet(isPresented: $showSettings) { SettingsView() }
         .fullScreenCover(isPresented: $showVaultLock) {
             VaultLockView {
                 showVaultLock = false
@@ -88,16 +100,37 @@ struct VaultView: View {
         capturedLocation = location; capturedHeading = heading
         if cameraVM.quickMode {
             let label = UserDefaults.standard.string(forKey: "selectedTemplate").flatMap { $0.isEmpty ? nil : $0 }
-            let result = WatermarkRenderer.apply(to: image, location: location, heading: heading, labelText: label)
-            if save(result) {
-                if cameraVM.event == nil { showCamera = false }
-            } else { capturedImage = result; saveError = true }
+            let context = cameraVM.pendingContext
+            isSavingQuickPhoto = true
+            cameraVM.isCapturing = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = WatermarkRenderer.apply(to: image, location: location, heading: heading, labelText: label)
+                let saved = FileStorageManager.shared.save(image: result, location: location, context: context) != nil
+                DispatchQueue.main.async {
+                    isSavingQuickPhoto = false
+                    cameraVM.isCapturing = false
+                    if saved {
+                        cameraVM.didSavePhoto()
+                        if cameraVM.event == nil { showCamera = false }
+                    } else { capturedImage = result; saveError = true }
+                }
+            }
         } else { capturedImage = image; showEditor = true }
     }
-    private func save(_ image: UIImage) -> Bool {
-        guard FileStorageManager.shared.save(image: image, location: capturedLocation, context: cameraVM.pendingContext) != nil else { return false }
-        cameraVM.didSavePhoto()
-        return true
+    private func save(_ image: UIImage, completion: @escaping (Bool) -> Void) {
+        let location = capturedLocation
+        let context = cameraVM.pendingContext
+        isSavingQuickPhoto = true
+        cameraVM.isCapturing = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let saved = FileStorageManager.shared.save(image: image, location: location, context: context) != nil
+            DispatchQueue.main.async {
+                isSavingQuickPhoto = false
+                cameraVM.isCapturing = false
+                if saved { cameraVM.didSavePhoto() }
+                completion(saved)
+            }
+        }
     }
     private enum Destination { case gallery, notes, map }
     private func open(_ destination: Destination?) {

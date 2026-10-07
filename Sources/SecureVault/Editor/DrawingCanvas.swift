@@ -25,11 +25,10 @@ enum AnnotationRenderer {
         return UIImage(cgImage: cg, scale: image.scale, orientation: .up)
     }
     static func render(image: UIImage, shapes: [DrawnShape]) -> UIImage {
-        let normalized = image.normalized() ?? image
-        let blur = shapes.contains { $0.tool == .blur } ? blurred(normalized) : nil
+        let blur = shapes.contains { $0.tool == .blur } ? blurred(image) : nil
         let format = UIGraphicsImageRendererFormat(); format.scale = 1
-        return UIGraphicsImageRenderer(size: normalized.size, format: format).image { ctx in
-            draw(image: normalized, blurred: blur, shapes: shapes, in: ctx.cgContext, size: normalized.size)
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { ctx in
+            draw(image: image, blurred: blur, shapes: shapes, in: ctx.cgContext, size: image.size)
         }
     }
     static func draw(image: UIImage, blurred: UIImage?, shapes: [DrawnShape], in ctx: CGContext, size: CGSize) {
@@ -87,10 +86,17 @@ private final class AnnotationImageView: UIView {
     }
 }
 
+final class ZoomScrollView: UIScrollView {
+    var onLayout: (() -> Void)?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?()
+    }
+}
+
 struct ZoomAnnotationCanvas: UIViewRepresentable {
     let image: UIImage
     @Binding var shapes: [DrawnShape]
-    @Binding var zoom: Double
     var tool: DrawingTool
     var color: Color
     var text: String
@@ -98,23 +104,21 @@ struct ZoomAnnotationCanvas: UIViewRepresentable {
     var textSize: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-    func makeUIView(context: Context) -> UIScrollView {
-        let scroll = UIScrollView()
+    func makeUIView(context: Context) -> ZoomScrollView {
+        let scroll = ZoomScrollView()
         scroll.backgroundColor = .black
         scroll.delegate = context.coordinator
+        scroll.onLayout = { [weak coordinator = context.coordinator] in coordinator?.fitIfNeeded() }
         scroll.panGestureRecognizer.minimumNumberOfTouches = 2
         scroll.showsHorizontalScrollIndicator = false
         scroll.showsVerticalScrollIndicator = false
         scroll.bouncesZoom = false
         scroll.delaysContentTouches = false
         let canvas = context.coordinator.canvas
-        let original = image.normalized() ?? image
+        let original = image
         let ratio = min(1, 1600 / max(original.size.width, original.size.height))
         let size = CGSize(width: original.size.width * ratio, height: original.size.height * ratio)
-        let format = UIGraphicsImageRendererFormat(); format.scale = 1
-        let preview = UIGraphicsImageRenderer(size: size, format: format).image { _ in original.draw(in: CGRect(origin: .zero, size: size)) }
-        canvas.image = preview
-        canvas.blurredImage = AnnotationRenderer.blurred(preview)
+        canvas.backgroundColor = .black
         canvas.frame = CGRect(origin: .zero, size: size)
         canvas.contentScaleFactor = 1
         canvas.isMultipleTouchEnabled = true
@@ -128,14 +132,31 @@ struct ZoomAnnotationCanvas: UIViewRepresentable {
         tap.delegate = context.coordinator
         canvas.addGestureRecognizer(tap)
         context.coordinator.scroll = scroll
+        let coordinator = context.coordinator
+        DispatchQueue.global(qos: .userInitiated).async { [weak canvas, weak coordinator] in
+            guard canvas != nil else { return }
+            let preview = original.preparingThumbnail(ofSize: size) ?? {
+                let format = UIGraphicsImageRendererFormat(); format.scale = 1
+                return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                    original.draw(in: CGRect(origin: .zero, size: size))
+                }
+            }()
+            DispatchQueue.main.async { [weak canvas, weak coordinator] in
+                guard let canvas = canvas else { return }
+                canvas.image = preview
+                canvas.setNeedsDisplay()
+                coordinator?.prepareBlurIfNeeded()
+            }
+        }
         return scroll
     }
-    func updateUIView(_ scroll: UIScrollView, context: Context) {
+    func updateUIView(_ scroll: ZoomScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
         coordinator.canvas.shapes = shapes
         coordinator.canvas.setNeedsDisplay()
-        DispatchQueue.main.async { coordinator.fitAndZoom() }
+        coordinator.prepareBlurIfNeeded()
+        coordinator.fitIfNeeded()
     }
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var parent: ZoomAnnotationCanvas
@@ -143,27 +164,37 @@ struct ZoomAnnotationCanvas: UIViewRepresentable {
         weak var scroll: UIScrollView?
         private var viewport = CGSize.zero
         private var draft: DrawnShape?
-        private var fitting = false
+        var blurInProgress = false
         init(_ parent: ZoomAnnotationCanvas) { self.parent = parent }
-        func fitAndZoom() {
-            guard let scroll = scroll, scroll.bounds.width > 0, scroll.bounds.height > 0 else { return }
-            fitting = true
-            let fit = min(scroll.bounds.width / canvas.bounds.width, scroll.bounds.height / canvas.bounds.height)
-            if viewport != scroll.bounds.size {
-                viewport = scroll.bounds.size
-                scroll.minimumZoomScale = fit; scroll.maximumZoomScale = fit * 8
+        func prepareBlurIfNeeded() {
+            guard parent.tool == .blur, let preview = canvas.image,
+                  canvas.blurredImage == nil, !blurInProgress else { return }
+            blurInProgress = true
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let blurred = AnnotationRenderer.blurred(preview)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.blurInProgress = false
+                    guard self.scroll != nil else { return }
+                    self.canvas.blurredImage = blurred
+                    self.canvas.setNeedsDisplay()
+                }
             }
-            let target = fit * CGFloat(parent.zoom)
-            if abs(scroll.zoomScale - target) > 0.001 { scroll.setZoomScale(target, animated: false) }
+        }
+        func fitIfNeeded() {
+            guard let scroll = scroll, scroll.bounds.width > 0, scroll.bounds.height > 0,
+                  canvas.bounds.width > 0, canvas.bounds.height > 0,
+                  viewport != scroll.bounds.size else { return }
+            let previousRatio = scroll.minimumZoomScale > 0 ? scroll.zoomScale / scroll.minimumZoomScale : 1
+            let fit = min(scroll.bounds.width / canvas.bounds.width, scroll.bounds.height / canvas.bounds.height)
+            viewport = scroll.bounds.size
+            scroll.minimumZoomScale = fit; scroll.maximumZoomScale = fit * 8
+            scroll.setZoomScale(min(fit * 8, max(fit, fit * previousRatio)), animated: false)
             center()
-            fitting = false
         }
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { canvas }
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             center()
-            guard !fitting, scrollView.minimumZoomScale > 0 else { return }
-            let value = Double(scrollView.zoomScale / scrollView.minimumZoomScale)
-            parent.zoom = min(8, max(1, value))
         }
         private func center() {
             guard let scroll = scroll else { return }

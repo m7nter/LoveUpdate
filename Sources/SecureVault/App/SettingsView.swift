@@ -55,6 +55,14 @@ struct SettingsView: View {
                     Text("Жест в камере скрывает экран; повторный жест возвращает его. Геолокация продолжает обновляться, пока приложение активно. Это не блокировка iPhone; GPS зависит от условий приёма, режим расходует батарею.")
                         .font(.caption).foregroundColor(.secondary)
                 }
+                Section("Пометки на фото") {
+                    Picker("Цвет стрелок, овалов и текста", selection: $store.annotationColor) {
+                        Text("Красный").tag("red")
+                        Text("Жёлтый").tag("yellow")
+                        Text("Белый").tag("white")
+                        Text("Чёрный").tag("black")
+                    }
+                }
                 Section("Фото на снимках") {
                     HStack(spacing: 16) {
                         if let img = store.avatarImage {

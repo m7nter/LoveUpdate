@@ -18,6 +18,7 @@ final class CameraViewModel: NSObject, ObservableObject {
     private let queue = DispatchQueue(label: "SecureVault.camera")
     private let photoOutput = AVCapturePhotoOutput()
     private var device: AVCaptureDevice?
+    private var photoDimensions: CMVideoDimensions?
     private var zoomMultiplier: Double = 1
     private var configured = false
     private var wantsSession = false
@@ -53,22 +54,34 @@ final class CameraViewModel: NSObject, ObservableObject {
             guard self.wantsSession else { return }
             guard (try? VaultGate.shared.withAccess(generation: self.ownerGeneration) { true }) == true else { return }
             if !self.configured {
-                guard let device = AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back)
-                    ?? AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back)
-                    ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+                let cameras = [
+                    AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back),
+                    AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back),
+                    AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+                ].compactMap { $0 }
+                // A virtual camera can expose a wider still format than the old wide lens.
+                // Prefer the first camera with a native 4:3 photo format, preserving the
+                // original framing while retaining seamless lens switching when possible.
+                guard let device = cameras.first(where: { Self.preferredPhotoDimensions(for: $0) != nil })
+                    ?? cameras.last else {
                     self.reportError("Камера недоступна"); return
                 }
                 do {
                     let input = try AVCaptureDeviceInput(device: device)
                     self.session.beginConfiguration()
-                    defer { self.session.commitConfiguration() }
                     guard self.session.canAddInput(input), self.session.canAddOutput(self.photoOutput) else {
+                        self.session.commitConfiguration()
                         self.reportError("Не удалось настроить камеру"); return
                     }
                     self.session.sessionPreset = .photo
                     self.session.addInput(input)
                     self.session.addOutput(self.photoOutput)
+                    self.session.commitConfiguration()
                     self.device = device
+                    self.photoDimensions = Self.preferredPhotoDimensions(for: device)
+                    if let dimensions = self.photoDimensions {
+                        self.photoOutput.maxPhotoDimensions = dimensions
+                    }
                     let ultraWide = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
                     self.zoomMultiplier = ultraWide ? 1 / (device.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 2) : 1
                     let lower = max(0.5, Double(device.minAvailableVideoZoomFactor) * self.zoomMultiplier)
@@ -99,7 +112,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         }
     }
 
-    func setZoom(_ value: Double) {
+    func setZoom(_ value: Double, animated: Bool = false) {
         let clamped = min(maximumZoom, max(minimumZoom, value))
         zoom = clamped
         queue.async {
@@ -107,7 +120,12 @@ final class CameraViewModel: NSObject, ObservableObject {
             do {
                 try device.lockForConfiguration()
                 let factor = CGFloat(clamped / self.zoomMultiplier)
-                device.ramp(toVideoZoomFactor: min(device.maxAvailableVideoZoomFactor, max(device.minAvailableVideoZoomFactor, factor)), withRate: 6)
+                let target = min(device.maxAvailableVideoZoomFactor, max(device.minAvailableVideoZoomFactor, factor))
+                if animated { device.ramp(toVideoZoomFactor: target, withRate: 6) }
+                else {
+                    if device.isRampingVideoZoom { device.cancelVideoZoomRamp() }
+                    device.videoZoomFactor = target
+                }
                 device.unlockForConfiguration()
             } catch { self.reportError("Не удалось изменить увеличение") }
         }
@@ -129,7 +147,6 @@ final class CameraViewModel: NSObject, ObservableObject {
     func capturePhoto(completion: @escaping (UIImage, CLLocation?, CLHeading?) -> Void) {
         guard (try? VaultGate.shared.withAccess(generation: ownerGeneration) { true }) == true else { return }
         guard !isCapturing, session.isRunning else { return }
-        reconcileEvent()
         if event == nil { event = FileStorageManager.shared.newEvent(); persistEvent() }
         pendingContext = event
         pendingContext?.capturedAt = Date()
@@ -138,13 +155,16 @@ final class CameraViewModel: NSObject, ObservableObject {
         let location = LocationManager.shared.location
         shotLocation = location.flatMap { $0.horizontalAccuracy >= 0 && abs($0.timestamp.timeIntervalSinceNow) < 15 ? $0 : nil }
         shotHeading = LocationManager.shared.heading
-        queue.async { self.photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self) }
+        queue.async {
+            let settings = AVCapturePhotoSettings()
+            if let dimensions = self.photoDimensions { settings.maxPhotoDimensions = dimensions }
+            self.photoOutput.capturePhoto(with: settings, delegate: self)
+        }
     }
 
     func didSavePhoto() {
         guard var current = event else { return }
         if current.index >= current.expectedCount {
-            FileStorageManager.shared.completeEvent(current.eventID)
             event = nil
         }
         else { current.index += 1; event = current }
@@ -178,6 +198,20 @@ final class CameraViewModel: NSObject, ObservableObject {
         } else { UserDefaults.standard.removeObject(forKey: "pendingCaptureEvent") }
     }
     private func reportError(_ message: String) { DispatchQueue.main.async { self.error = message } }
+
+    private static func preferredPhotoDimensions(for device: AVCaptureDevice) -> CMVideoDimensions? {
+        let fourByThree = device.activeFormat.supportedMaxPhotoDimensions.filter { dimensions in
+            let longSide = Double(max(dimensions.width, dimensions.height))
+            let shortSide = Double(min(dimensions.width, dimensions.height))
+            return shortSide > 0 && abs(longSide / shortSide - 4.0 / 3.0) < 0.02
+        }
+        // Around 12 MP gives the original camera's useful detail without the
+        // latency and memory pressure of an optional 48 MP capture format.
+        let standard = fourByThree.filter { Int64($0.width) * Int64($0.height) <= 16_000_000 }
+        return (standard.isEmpty ? fourByThree : standard).max {
+            Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
+        }
+    }
 }
 
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {

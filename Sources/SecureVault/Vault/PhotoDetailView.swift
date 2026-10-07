@@ -8,6 +8,9 @@ struct PhotoDetailView: View {
     @Environment(\.dismiss) var dismiss
     @State private var currentIndex: Int
     @State private var showEditor = false
+    @State private var editorImage: UIImage?
+    @State private var loadingEditor = false
+    @State private var editorLoadError = false
     @State private var showDeleteConfirm = false
     @State private var showNoteEditor = false
     @State private var noteText: String = ""
@@ -26,12 +29,10 @@ struct PhotoDetailView: View {
         return urls[min(max(currentIndex, 0), urls.count - 1)]
     }
 
-    private var hasNote: Bool {
-        !(currentURL.flatMap { FileStorageManager.shared.loadMeta(for: $0)?.note } ?? "").isEmpty
-    }
-
     var body: some View {
-        ZStack {
+        let meta = currentURL.flatMap { FileStorageManager.shared.loadMeta(for: $0) }
+        let note = meta?.note ?? ""
+        return ZStack {
             Color.black.ignoresSafeArea()
 
             TabView(selection: $currentIndex) {
@@ -64,22 +65,26 @@ struct PhotoDetailView: View {
                     Spacer()
                     HStack(spacing: 12) {
                         Button {
-                            guard let url = currentURL else { dismiss(); return }
-                            noteText = FileStorageManager.shared.loadMeta(for: url)?.note ?? ""
+                            guard currentURL != nil else { dismiss(); return }
+                            noteText = note
                             showNoteEditor = true
                         } label: {
-                            Image(systemName: hasNote ? "note.text" : "note")
-                                .foregroundColor(hasNote ? .orange : .white)
+                            Image(systemName: note.isEmpty ? "note" : "note.text")
+                                .foregroundColor(note.isEmpty ? .white : .orange)
                                 .padding(10)
                                 .background(Color.black.opacity(0.5))
                                 .clipShape(Circle())
                         }
-                        Button { showEditor = true } label: {
+                        Button { openEditor() } label: {
                             Image(systemName: "pencil")
                                 .foregroundColor(.white)
                                 .padding(10)
                                 .background(Color.black.opacity(0.5))
                                 .clipShape(Circle())
+                        }
+                        .disabled(loadingEditor)
+                        .alert("Не удалось открыть фото", isPresented: $editorLoadError) {
+                            Button("Закрыть", role: .cancel) {}
                         }
                         Button {
                             showDeleteConfirm = true
@@ -95,16 +100,17 @@ struct PhotoDetailView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 60)
 
-                Text(currentURL.map { FileStorageManager.shared.title(for: $0) } ?? "Фото удалено")
+                Text(currentURL.map { FileStorageManager.shared.title(for: $0, meta: meta,
+                    numberingMode: SettingsStore.shared.numberingMode) } ?? "Фото удалено")
                     .font(.caption).foregroundColor(.white)
                     .padding(8).background(Color.black.opacity(0.6)).cornerRadius(8)
 
-                if hasNote {
+                if !note.isEmpty {
                     HStack {
                         Image(systemName: "note.text")
                             .foregroundColor(.orange)
                             .font(.caption)
-                        Text(currentURL.flatMap { FileStorageManager.shared.loadMeta(for: $0)?.note } ?? "")
+                        Text(note)
                             .font(.caption)
                             .foregroundColor(.white)
                             .lineLimit(2)
@@ -118,12 +124,14 @@ struct PhotoDetailView: View {
                     .padding(.top, 8)
                 }
 
+                if loadingEditor { ProgressView("Открытие фото…").tint(.orange) }
+
                 Spacer()
             }
             .allowsHitTesting(true)
         }
-        .sheet(isPresented: $showEditor) {
-            if let url = currentURL, let img = FileStorageManager.shared.loadImage(at: url) {
+        .sheet(isPresented: $showEditor, onDismiss: { editorImage = nil }) {
+            if let url = currentURL, let img = editorImage {
                 GalleryEditorView(image: img, url: url) { _ in
                     refreshToken = UUID()
                 }
@@ -149,12 +157,38 @@ struct PhotoDetailView: View {
         }
         .onChange(of: urls) { if $0.isEmpty { dismiss() } }
     }
+
+    private func openEditor() {
+        guard let url = currentURL, !loadingEditor else { return }
+        loadingEditor = true
+        let generation = accessGeneration
+        DispatchQueue.global(qos: .userInitiated).async {
+            let loaded = FileStorageManager.shared.loadImage(at: url)
+            DispatchQueue.main.async {
+                loadingEditor = false
+                guard currentURL == url, VaultGate.shared.generation == generation else { return }
+                if let loaded { editorImage = loaded; showEditor = true }
+                else { editorLoadError = true }
+            }
+        }
+    }
 }
 
 private struct PhotoPageView: View {
     let url: URL
     let refreshToken: UUID
     @State private var image: UIImage?
+    @State private var isVisible = false
+    @State private var loadTicket = UUID()
+    @State private var loadOperation: BlockOperation?
+    private let accessGeneration = VaultGate.shared.generation
+    private static let queue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "SecureVault.photoPreview"
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
 
     var body: some View {
         Group {
@@ -167,12 +201,35 @@ private struct PhotoPageView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { load() }
-        .onChange(of: refreshToken) { _ in load() }
+        .onAppear { isVisible = true; load() }
+        .onChange(of: refreshToken) { _ in if isVisible { load() } }
+        .onDisappear {
+            isVisible = false
+            loadOperation?.cancel(); loadOperation = nil
+            loadTicket = UUID(); image = nil
+        }
     }
 
     private func load() {
-        image = FileStorageManager.shared.loadImage(at: url)
+        let ticket = UUID()
+        loadTicket = ticket
+        image = nil
+        let url = self.url
+        let generation = accessGeneration
+        loadOperation?.cancel()
+        let operation = BlockOperation()
+        operation.addExecutionBlock { [weak operation] in
+            guard operation?.isCancelled == false else { return }
+            let preview = FileStorageManager.shared.loadThumbnail(at: url, maxPixelSize: 2560, generation: generation)
+            guard operation?.isCancelled == false else { return }
+            DispatchQueue.main.async {
+                guard self.loadTicket == ticket, VaultGate.shared.generation == generation else { return }
+                self.image = preview
+                self.loadOperation = nil
+            }
+        }
+        loadOperation = operation
+        Self.queue.addOperation(operation)
     }
 }
 

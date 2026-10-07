@@ -18,7 +18,7 @@ struct PhotoEditorView: View {
     let image: UIImage
     let location: CLLocation?
     let heading: CLHeading?
-    let onSave: (UIImage) -> Bool
+    let onSave: (UIImage, @escaping (Bool) -> Void) -> Void
     let onDiscard: () -> Void
     var body: some View {
         PhotoEditingView(image: image, addWatermark: true, location: location, heading: heading,
@@ -31,11 +31,11 @@ struct PhotoEditingView: View {
     let addWatermark: Bool
     let location: CLLocation?
     let heading: CLHeading?
-    let onSave: (UIImage) -> Bool
+    let onSave: (UIImage, @escaping (Bool) -> Void) -> Void
     let onCancel: () -> Void
     private let accessGeneration = VaultGate.shared.generation
     init(image: UIImage, addWatermark: Bool, location: CLLocation?, heading: CLHeading?,
-         onSave: @escaping (UIImage) -> Bool, onCancel: @escaping () -> Void) {
+         onSave: @escaping (UIImage, @escaping (Bool) -> Void) -> Void, onCancel: @escaping () -> Void) {
         self.image = image; self.addWatermark = addWatermark
         self.location = location; self.heading = heading
         self.onSave = onSave; self.onCancel = onCancel
@@ -43,8 +43,7 @@ struct PhotoEditingView: View {
     @StateObject private var templates = LabelTemplatesStore()
     @State private var shapes: [DrawnShape] = []
     @State private var tool: DrawingTool = .arrow
-    @State private var color: Color = .red
-    @State private var zoom: Double = 1
+    @ObservedObject private var settings = SettingsStore.shared
     @State private var text = ""
     @State private var textSize: Double = 0.045
     @State private var brushWidth: Double = 0.08
@@ -53,21 +52,23 @@ struct PhotoEditingView: View {
     @State private var isSaving = false
     @State private var saveError = false
 
+    private var annotationColor: Color {
+        switch settings.annotationColor {
+        case "yellow": return .yellow
+        case "white": return .white
+        case "black": return .black
+        default: return .red
+        }
+    }
+
     var body: some View {
         NavigationView {
             VStack(spacing: 8) {
-                ZoomAnnotationCanvas(image: image, shapes: $shapes, zoom: $zoom,
-                                     tool: tool, color: color, text: text,
+                ZoomAnnotationCanvas(image: image, shapes: $shapes,
+                                     tool: tool, color: annotationColor, text: text,
                                      brushWidth: CGFloat(brushWidth), textSize: CGFloat(textSize))
                     .overlay { if isSaving { ProgressView().tint(.orange) } }
                     .allowsHitTesting(!isSaving)
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                    Slider(value: $zoom, in: 1...8)
-                    Text(String(format: "%.1f×", zoom)).monospacedDigit()
-                    Button("Сброс") { zoom = 1 }
-                }
-                .padding(.horizontal)
                 if tool == .blur {
                     HStack {
                         Text("Кисть")
@@ -92,16 +93,7 @@ struct PhotoEditingView: View {
                             .accessibilityLabel("Шаблон подписи")
                     }
                 }.padding(.horizontal)
-                HStack(spacing: 20) {
-                    ForEach(["red", "yellow", "white", "black"], id: \.self) { name in
-                        let value = colorValue(name)
-                        Circle().fill(value).frame(width: 26, height: 26)
-                            .overlay(Circle().stroke(color == value ? Color.orange : Color.gray, lineWidth: 2))
-                            .onTapGesture { color = value }
-                    }
-                    Spacer()
-                    if tool == .text { Button("Изменить текст") { showText = true } }
-                }.padding(.horizontal).padding(.bottom, 8)
+                if tool == .text { Button("Изменить текст") { showText = true }.padding(.bottom, 8) }
             }
             .background(Color.black)
             .foregroundColor(.white)
@@ -130,9 +122,6 @@ struct PhotoEditingView: View {
         } message: { Text("Пометки остались в редакторе. Проверьте свободное место и повторите сохранение.") }
     }
 
-    private func colorValue(_ name: String) -> Color {
-        switch name { case "yellow": return .yellow; case "white": return .white; case "black": return .black; default: return .red }
-    }
     private func toolButton(_ icon: String, _ value: DrawingTool, _ label: String) -> some View {
         Button { tool = value } label: { Image(systemName: icon).foregroundColor(tool == value ? .orange : .white) }
             .accessibilityLabel(label)
@@ -148,10 +137,17 @@ struct PhotoEditingView: View {
         let epoch = accessGeneration
         DispatchQueue.global(qos: .userInitiated).async {
             let base = watermark ? WatermarkRenderer.apply(to: original, location: loc, heading: hdg, labelText: label) : original
-            let result = AnnotationRenderer.render(image: base, shapes: annotations)
+            let result = annotations.isEmpty ? base : AnnotationRenderer.render(image: base, shapes: annotations)
             DispatchQueue.main.async {
-                isSaving = false
-                if (try? VaultGate.shared.withAccess(generation: epoch) { onSave(result) }) != true { saveError = true }
+                guard (try? VaultGate.shared.withAccess(generation: epoch) { true }) == true else {
+                    isSaving = false; saveError = true; return
+                }
+                onSave(result) { saved in
+                    DispatchQueue.main.async {
+                        isSaving = false
+                        if !saved { saveError = true }
+                    }
+                }
             }
         }
     }
