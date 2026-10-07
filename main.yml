@@ -1,0 +1,68 @@
+name: Build SecureVault IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build:
+    name: Build IPA (no signing)
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26.6
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Fix App Icon
+        run: |
+          sips -z 1024 1024 \
+            Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png \
+            --out Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+          echo "Icon size after fix:"
+          sips -g pixelWidth -g pixelHeight \
+            Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build app
+        run: |
+          xcodebuild \
+            -project SecureVault.xcodeproj \
+            -scheme SecureVault \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            build
+
+      - name: Package into IPA
+        run: |
+          APP_PATH=$(find "$GITHUB_WORKSPACE/build" \
+            -path "*/Release-iphoneos/*.app" -type d | head -1)
+          echo "Found app at: $APP_PATH"
+          mkdir -p "$GITHUB_WORKSPACE/ipa_output/Payload"
+          cp -r "$APP_PATH" "$GITHUB_WORKSPACE/ipa_output/Payload/"
+          cd "$GITHUB_WORKSPACE/ipa_output"
+          zip -r "../SecureVault.ipa" Payload/
+          ls -lh "$GITHUB_WORKSPACE/SecureVault.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecureVault-IPA
+          path: SecureVault.ipa
+          retention-days: 30
