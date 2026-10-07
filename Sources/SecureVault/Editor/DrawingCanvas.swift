@@ -135,7 +135,7 @@ struct ZoomAnnotationCanvas: UIViewRepresentable {
         let coordinator = context.coordinator
         DispatchQueue.global(qos: .userInitiated).async { [weak canvas, weak coordinator] in
             guard canvas != nil else { return }
-            let preview = original.preparingThumbnail(ofSize: size) ?? {
+            let preview = original.preparingThumbnail(of: size) ?? {
                 let format = UIGraphicsImageRendererFormat(); format.scale = 1
                 return UIGraphicsImageRenderer(size: size, format: format).image { _ in
                     original.draw(in: CGRect(origin: .zero, size: size))
