@@ -132,14 +132,14 @@ class SettingsStore: ObservableObject {
             workModes = visibleModes.isEmpty ? ["0.5", "1", "2"] : visibleModes
         }
         if !workModes.contains(activeWorkMode) { activeWorkMode = workModes[0] }
-        _ = KeychainCodeStore.read("mainCode", legacyDefault: "2026")
+        _ = KeychainCodeStore.read("mainCode")
         _ = KeychainCodeStore.read("vaultCode")
         _ = KeychainCodeStore.read("kamikazeCode")
         _ = KeychainCodeStore.readActionToken()
     }
 
     var mainCode: String {
-        get { KeychainCodeStore.read("mainCode", legacyDefault: "2026") }
+        get { KeychainCodeStore.read("mainCode") }
         set { saveCode(newValue, for: "mainCode") }
     }
 

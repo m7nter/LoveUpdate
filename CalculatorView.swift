@@ -1,5 +1,4 @@
 import SwiftUI
-import AudioToolbox
 
 struct CalculatorView: View {
     @StateObject private var vm = CalculatorViewModel()
@@ -16,40 +15,40 @@ struct CalculatorView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let gap: CGFloat = min(11, max(8, geometry.size.width * 0.024))
-            let sideInset: CGFloat = min(20, max(14, geometry.size.width * 0.04))
+            let gap: CGFloat = 11
+            let sideInset: CGFloat = 18
             let widthForKey = (geometry.size.width - sideInset * 2 - gap * 3) / 4
-            let heightForKey = (geometry.size.height - 48 - 96 - 12 - gap * 4) / 5
-            let keySize = max(32, min(widthForKey, heightForKey))
+            let heightForKey = (geometry.size.height - 54 - 112 - 20 - gap * 4) / 5
+            let keySize = max(42, min(widthForKey, heightForKey))
 
             VStack(spacing: 0) {
                 toolbar
-                    .frame(height: 48)
-                    .padding(.horizontal, sideInset)
+                    .frame(height: 54)
+                    .padding(.horizontal, sideInset + 2)
 
-                Spacer(minLength: 4)
+                Spacer(minLength: 12)
 
-                VStack(alignment: .trailing, spacing: 2) {
+                VStack(alignment: .trailing, spacing: 3) {
                     if !vm.expression.isEmpty {
                         Text(vm.expression)
                             .font(.system(size: 21, weight: .regular))
-                            .foregroundColor(.white.opacity(0.48))
+                            .foregroundStyle(.white.opacity(0.50))
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
 
                     Text(vm.display)
-                        .font(.system(size: min(78, max(38, keySize * 0.92)), weight: .light))
+                        .font(.system(size: min(82, max(48, keySize * 0.96)), weight: .light))
                         .monospacedDigit()
-                        .foregroundColor(.white)
+                        .foregroundStyle(.white)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.36)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .minimumScaleFactor(0.34)
+                        .contentTransition(.numericText())
                 }
-                .padding(.horizontal, sideInset + 4)
-                .frame(minHeight: 84, alignment: .bottom)
-                .padding(.bottom, 12)
+                .frame(maxWidth: .infinity, minHeight: 96, alignment: .bottomTrailing)
+                .padding(.horizontal, sideInset + 3)
+                .padding(.bottom, 20)
 
                 VStack(spacing: gap) {
                     ForEach(buttons.indices, id: \.self) { rowIndex in
@@ -57,15 +56,15 @@ struct CalculatorView: View {
                             ForEach(buttons[rowIndex], id: \.self) { symbol in
                                 CalculatorButton(
                                     title: symbol == "CLEAR" ? vm.clearButtonTitle : symbol,
-                                    vm: vm,
-                                    size: keySize
+                                    size: keySize,
+                                    isSelected: vm.activeOperator == symbol,
+                                    action: vm.tap
                                 )
                             }
                         }
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.bottom, 12)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -87,7 +86,7 @@ struct CalculatorView: View {
             Button {
                 showHistory = true
             } label: {
-                Image(systemName: "clock")
+                Image(systemName: "list.bullet")
                     .font(.system(size: 20, weight: .medium))
                     .frame(width: 44, height: 44)
                     .contentShape(Circle())
@@ -106,7 +105,7 @@ struct CalculatorView: View {
                 Button {
                     showHistory = true
                 } label: {
-                    Label("История", systemImage: "clock")
+                    Label("История", systemImage: "list.bullet")
                 }
             } label: {
                 Image(systemName: "calculator")
@@ -122,8 +121,7 @@ struct CalculatorView: View {
     }
 }
 
-// Keep the dynamic material on the small navigation controls. It is costly
-// and distracting when applied to every key in this frequently used grid.
+// Match the system's rounded material on the navigation controls.
 private struct CalculatorTopSurface: ViewModifier {
     @ViewBuilder func body(content: Content) -> some View {
         #if compiler(>=6.2)
@@ -141,27 +139,33 @@ private struct CalculatorTopSurface: ViewModifier {
 private struct CalculatorKeyPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-            .brightness(configuration.isPressed ? 0.12 : 0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .animation(.easeOut(duration: 0.10), value: configuration.isPressed)
     }
 }
 
 struct CalculatorButton: View {
     let title: String
-    @ObservedObject var vm: CalculatorViewModel
     let size: CGFloat
+    let isSelected: Bool
+    let action: (String) -> Void
 
     private var isOperator: Bool {
         ["÷", "×", "−", "+", "="].contains(title)
     }
 
     private var backgroundColor: Color {
+        if isSelected { return .white }
         if isOperator { return Color(red: 1, green: 0.62, blue: 0.04) }
         if ["⌫", "AC", "C", "%", "+/−"].contains(title) {
-            return Color(red: 0.35, green: 0.35, blue: 0.36)
+            return Color(red: 0.65, green: 0.65, blue: 0.65)
         }
-        return Color(red: 0.19, green: 0.19, blue: 0.20)
+        return Color(red: 0.20, green: 0.20, blue: 0.20)
+    }
+
+    private var textColor: Color {
+        if isSelected { return Color(red: 1, green: 0.62, blue: 0.04) }
+        return ["⌫", "AC", "C", "%", "+/−"].contains(title) ? .black : .white
     }
 
     private var label: some View {
@@ -179,43 +183,36 @@ struct CalculatorButton: View {
                     .lineLimit(1)
             }
         }
-        .foregroundColor(.white)
+        .foregroundColor(textColor)
     }
 
-    private func playClick() {
-        switch title {
-        case "⌫": AudioServicesPlaySystemSound(1155)
-        case "AC", "C", "+/−", "%": AudioServicesPlaySystemSound(1156)
-        default: AudioServicesPlaySystemSound(1123)
+    @ViewBuilder private var keyFace: some View {
+        let content = label.frame(width: size, height: size)
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.tint(backgroundColor).interactive(), in: Circle())
+        } else {
+            content.background(backgroundColor, in: Circle())
         }
+        #else
+        content.background(backgroundColor, in: Circle())
+        #endif
     }
 
     var body: some View {
         Button {
-            playClick()
-            vm.tap(title)
+            action(title)
         } label: {
-            label
-                .frame(width: size, height: size)
-                .background {
-                    Circle()
-                        .fill(backgroundColor)
-                        .overlay {
-                            Circle().strokeBorder(Color.white.opacity(0.075), lineWidth: 0.8)
-                        }
-                }
+            keyFace
                 .contentShape(Circle())
         }
         .buttonStyle(CalculatorKeyPressStyle())
-        .accessibilityLabel(title == "+/−" ? "Сменить знак" : title)
+        .accessibilityLabel(title == "+/−" ? "Сменить знак" : title == "⌫" ? "Удалить цифру" : title)
         .simultaneousGesture(
-            title == "⌫" ?
             LongPressGesture(minimumDuration: 0.5)
                 .onEnded { _ in
-                    playClick()
-                    vm.tap("AC")
+                    if title == "⌫" || title == "C" { action("AC") }
                 }
-            : nil
         )
     }
 }

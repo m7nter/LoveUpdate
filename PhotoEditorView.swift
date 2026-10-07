@@ -79,29 +79,22 @@ struct PhotoEditingView: View {
                      ? "Коснитесь фото для надписи. Перетащите её пальцем, измените размер щипком."
                      : "Один палец — пометки, два пальца — масштаб и перемещение фото.")
                     .font(.caption).foregroundColor(.secondary).padding(.horizontal)
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     toolButton("arrow.up.right", .arrow, "Стрелка")
                     toolButton("oval", .oval, "Овал")
                     Button {
+                        let wasSelected = tool == .text
                         tool = .text
-                        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { showText = true }
+                        if wasSelected || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            showText = true
+                        }
                     } label: { toolTile("textformat", title: "Текст", selected: tool == .text) }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Текст на фото")
-                    toolButton("drop.halffull", .blur, "Кисть размытия")
-                    Button { if !shapes.isEmpty { shapes.removeLast() } } label: {
-                        toolTile("arrow.uturn.backward", title: "Отмена", selected: false)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(shapes.isEmpty)
-                    .accessibilityLabel("Отменить последнюю пометку")
+                    toolButton("eye.slash", .blur, "Размытие")
                 }
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 12)
                 HStack(spacing: 8) {
-                    if tool == .text {
-                        Button("Изменить текст") { showText = true }
-                            .frame(minHeight: 44)
-                    }
                     if addWatermark {
                         Button {
                             showTemplates = true
@@ -115,6 +108,17 @@ struct PhotoEditingView: View {
                         }
                         .accessibilityLabel("Выбрать шаблон подписи для следующих фото")
                     }
+                    Spacer(minLength: 0)
+                    Button { if !shapes.isEmpty { shapes.removeLast() } } label: {
+                        Label("Отменить", systemImage: "arrow.uturn.backward")
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(minWidth: 96, minHeight: 52)
+                            .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(shapes.isEmpty)
+                    .accessibilityLabel("Отменить последнюю пометку")
                 }
                 .padding(.horizontal, 12)
                 .padding(.bottom, 4)
@@ -152,14 +156,18 @@ struct PhotoEditingView: View {
             .accessibilityLabel(label)
     }
     private func toolTile(_ icon: String, title: String, selected: Bool) -> some View {
-        VStack(spacing: 4) {
-            Image(systemName: icon).font(.system(size: 22, weight: .semibold))
-            Text(title).font(.system(size: 10, weight: .medium)).lineLimit(1).minimumScaleFactor(0.8)
+        VStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 27, weight: .semibold))
+            Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
         }
         .foregroundColor(selected ? .orange : .white)
-        .frame(maxWidth: .infinity, minHeight: 60)
-        .background(selected ? Color.orange.opacity(0.16) : Color.white.opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity, minHeight: 76)
+        .background(selected ? Color.orange.opacity(0.24) : Color.white.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(selected ? Color.orange : Color.clear, lineWidth: 2)
+        }
         .contentShape(Rectangle())
     }
     private func save() {

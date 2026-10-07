@@ -337,6 +337,7 @@ struct ChangeCodeView: View {
     let currentCode: String
     let requireCurrent: Bool
     var forbiddenCodes: [String] = []
+    var allowCancel = true
     let onSave: (String) -> Bool
 
     @Environment(\.dismiss) var dismiss
@@ -348,6 +349,12 @@ struct ChangeCodeView: View {
     var body: some View {
         NavigationView {
             Form {
+                if !allowCancel {
+                    Section {
+                        Text("Создайте код из 4–8 цифр. В дальнейшем наберите его на калькуляторе и нажмите «=», чтобы открыть хранилище.")
+                            .font(.subheadline)
+                    }
+                }
                 if requireCurrent {
                     Section("Текущий пароль") {
                         SecureField("Введите текущий пароль", text: $oldCode)
@@ -369,14 +376,17 @@ struct ChangeCodeView: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Отмена") { dismiss() }.foregroundColor(.red)
+                if allowCancel {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button("Отмена") { dismiss() }.foregroundColor(.red)
+                    }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Сохранить") { save() }.foregroundColor(.orange)
                 }
             }
         }
+        .interactiveDismissDisabled(!allowCancel)
     }
 
     private func save() {

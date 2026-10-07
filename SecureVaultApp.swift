@@ -123,13 +123,11 @@ struct SecureVaultApp: App {
 }
 
 struct RootView: View {
-    @Environment(\.scenePhase) private var scenePhase
     @Binding var isUnlocked: Bool
     @Binding var isCameraOnly: Bool
     let onStartTimer: () -> Void
     let onStopTimer: () -> Void
-    @State private var needsCodeUpgrade = false
-    @State private var codeUpgraded = false
+    @State private var needsInitialCode = false
 
     var body: some View {
         Group {
@@ -149,8 +147,8 @@ struct RootView: View {
                 CalculatorView(onUnlock: {
                     guard !VaultLifecycle.shared.blocksUI,
                           (try? VaultGate.shared.withAccess { true }) == true else { return }
-                    if SettingsStore.shared.mainCode == "2026" {
-                        needsCodeUpgrade = true
+                    if SettingsStore.shared.mainCode.isEmpty || SettingsStore.shared.mainCode == "2026" {
+                        needsInitialCode = true
                         return
                     }
                     isUnlocked = true
@@ -158,20 +156,16 @@ struct RootView: View {
                 })
             }
         }
-        .sheet(isPresented: $needsCodeUpgrade, onDismiss: {
-            guard codeUpgraded else { return }
-            codeUpgraded = false
-            guard scenePhase == .active, !VaultLifecycle.shared.blocksUI,
-                  (try? VaultGate.shared.withAccess { true }) == true else { return }
-            isUnlocked = true
-            onStartTimer()
-        }) {
+        .onAppear {
+            guard !VaultLifecycle.shared.blocksUI else { return }
+            let code = SettingsStore.shared.mainCode
+            if code.isEmpty || code == "2026" { needsInitialCode = true }
+        }
+        .sheet(isPresented: $needsInitialCode) {
             ChangeCodeView(title: "Создайте личный код", currentCode: "2026", requireCurrent: false,
-                           forbiddenCodes: ["2026", SettingsStore.shared.kamikazeCode]) { code in
+                           forbiddenCodes: ["2026", SettingsStore.shared.kamikazeCode], allowCancel: false) { code in
                 SettingsStore.shared.mainCode = code
-                guard SettingsStore.shared.securityError == nil else { return false }
-                codeUpgraded = true
-                return true
+                return SettingsStore.shared.securityError == nil
             }
         }
     }

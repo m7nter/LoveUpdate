@@ -51,7 +51,18 @@ struct CameraScreen: View {
 
     var body: some View {
         ZStack {
-            CameraView(session: cameraVM.session)
+            CameraView(session: cameraVM.session) { scale, state in
+                guard !blackScreen else { return }
+                switch state {
+                case .began:
+                    pinchStart = cameraVM.zoom
+                case .changed:
+                    if pinchStart == nil { pinchStart = cameraVM.zoom }
+                    cameraVM.setZoom((pinchStart ?? cameraVM.zoom) * Double(scale))
+                default:
+                    pinchStart = nil
+                }
+            }
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -203,11 +214,6 @@ struct CameraScreen: View {
                 Color.black.ignoresSafeArea().contentShape(Rectangle())
             }
         }
-        .simultaneousGesture(MagnificationGesture().onChanged { scale in
-            guard !blackScreen else { return }
-            if pinchStart == nil { pinchStart = cameraVM.zoom }
-            cameraVM.setZoom((pinchStart ?? cameraVM.zoom) * Double(scale))
-        }.onEnded { _ in pinchStart = nil })
         .background(ThreeFingerDoubleTap(enabled: settings.blackScreenEnabled) { setBlackScreen(!blackScreen) })
         .statusBarHidden(blackScreen)
         .persistentSystemOverlays(blackScreen ? .hidden : .automatic)

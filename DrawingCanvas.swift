@@ -170,6 +170,12 @@ private final class AnnotationCanvasView: UIView {
         blurView.isHidden = true
         draftBlurView.layer.mask = draftBlurMask
         draftBlurView.isHidden = true
+        // The in-progress brush uses a stroked centerline. Expanding the entire
+        // path to a filled outline for every touch sample made long strokes lag.
+        draftBlurMask.fillColor = nil
+        draftBlurMask.strokeColor = UIColor.white.cgColor
+        draftBlurMask.lineCap = .round
+        draftBlurMask.lineJoin = .round
         for overlay in [vectorView, draftVectorView] {
             overlay.backgroundColor = .clear
             overlay.isOpaque = false
@@ -219,7 +225,16 @@ private final class AnnotationCanvasView: UIView {
     }
 
     func displayDraft(_ shape: DrawnShape?, selectedTextID: UUID? = nil) {
-        guard draftShape != shape || draftVectorView.selectedTextID != selectedTextID else { return }
+        let unchanged: Bool
+        if draftShape?.tool == .blur, shape?.tool == .blur {
+            unchanged = draftShape?.id == shape?.id
+                && draftShape?.points.count == shape?.points.count
+                && draftShape?.width == shape?.width
+                && draftVectorView.selectedTextID == selectedTextID
+        } else {
+            unchanged = draftShape == shape && draftVectorView.selectedTextID == selectedTextID
+        }
+        guard !unchanged else { return }
         let blurChanged = draftShape?.tool == .blur || shape?.tool == .blur
         let vectorChanged = (draftShape != nil && draftShape?.tool != .blur)
             || (shape != nil && shape?.tool != .blur)
@@ -245,9 +260,22 @@ private final class AnnotationCanvasView: UIView {
         let hasBlur = blurredPreview != nil && draftShape?.tool == .blur
         draftBlurView.isHidden = !hasBlur
         guard let draftShape = draftShape, hasBlur else { return }
+        let points = draftShape.points.isEmpty ? [draftShape.start, draftShape.end] : draftShape.points
+        guard let first = points.first else { return }
+        let path = CGMutablePath()
+        let start = CGPoint(x: first.x * bounds.width, y: first.y * bounds.height)
+        path.move(to: start)
+        if points.count == 1 {
+            path.addLine(to: CGPoint(x: start.x + 0.01, y: start.y))
+        } else {
+            for point in points.dropFirst() {
+                path.addLine(to: CGPoint(x: point.x * bounds.width, y: point.y * bounds.height))
+            }
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        draftBlurMask.path = AnnotationRenderer.blurPath(for: [draftShape], size: bounds.size)
+        draftBlurMask.lineWidth = max(1, bounds.width * draftShape.width)
+        draftBlurMask.path = path
         CATransaction.commit()
     }
 }
@@ -448,30 +476,37 @@ struct ZoomAnnotationCanvas: UIViewRepresentable {
                 return
             }
             let p = point(recognizer)
+            var refreshDraft = false
             switch recognizer.state {
             case .began:
                 draft = DrawnShape(tool: parent.tool, start: p, end: p, color: parent.color,
                                    points: [p], width: parent.tool == .blur ? parent.brushWidth : 0.006)
+                refreshDraft = true
             case .changed, .ended:
-                draft?.end = p
                 if draft?.tool == .blur {
                     if let last = draft?.points.last,
                        hypot((p.x - last.x) * canvas.bounds.width,
-                             (p.y - last.y) * canvas.bounds.height) >= 2 {
+                             (p.y - last.y) * canvas.bounds.height) >= (recognizer.state == .ended ? 0.01 : 3) {
                         draft?.points.append(p)
+                        draft?.end = p
+                        refreshDraft = true
                     }
                 } else {
+                    draft?.end = p
                     draft?.points = [draft?.start ?? p, p]
+                    refreshDraft = true
                 }
                 if recognizer.state == .ended, let shape = draft {
                     parent.shapes.append(shape)
                     draft = nil
                     canvas.display(parent.shapes, selectedTextID: selectedTextID)
+                    refreshDraft = true
                 }
             default:
                 draft = nil
+                refreshDraft = true
             }
-            canvas.displayDraft(draft)
+            if refreshDraft { canvas.displayDraft(draft) }
         }
 
         private func moveText(_ recognizer: UIPanGestureRecognizer) {

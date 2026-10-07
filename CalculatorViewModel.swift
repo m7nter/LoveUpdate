@@ -14,11 +14,25 @@ class CalculatorViewModel: ObservableObject {
     private var lastOperator: String? = nil
     private var lastOperand: Double = 0
     private var pinInput = ""
+    private var pinEntryInvalid = false
     private let pinAttemptsKey = "vaultPinAttempts"
     private let pinCooldownKey = "vaultPinCooldownUntil"
+    private let formatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.groupingSeparator = " "
+        formatter.decimalSeparator = ","
+        formatter.maximumFractionDigits = 6
+        formatter.groupingSize = 3
+        return formatter
+    }()
 
     var clearButtonTitle: String {
         currentInput.isEmpty && display == "0" ? "AC" : "C"
+    }
+
+    var activeOperator: String? {
+        shouldResetDisplay ? currentOperator : nil
     }
 
     func tap(_ symbol: String) {
@@ -49,37 +63,43 @@ class CalculatorViewModel: ObservableObject {
     private func clearCurrent() {
         currentInput = ""
         pinInput = ""
+        pinEntryInvalid = false
         display = "0"
     }
 
     private func formatted(_ value: Double) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        formatter.groupingSeparator = " "
-        formatter.decimalSeparator = ","
-        formatter.maximumFractionDigits = 6
-        formatter.groupingSize = 3
         return formatter.string(from: NSNumber(value: value)) ?? formatResult(value)
     }
 
     private func handleDigit(_ d: String) {
         if d == "." && currentInput.contains(".") { return }
+        var digitAccepted = true
         if shouldResetDisplay {
             if currentOperator == nil { lastOperator = nil; lastOperand = 0 }
             currentInput = d == "." ? "0." : d
             pinInput = ""
+            pinEntryInvalid = currentOperator != nil
             shouldResetDisplay = false
         } else {
             if currentInput == "0" && d != "." {
                 currentInput = d
             } else {
                 if currentInput.count < 9 { currentInput += d }
+                else { digitAccepted = false }
             }
         }
-        if d == "." { pinInput = "" }
-        else if currentOperator == nil && pinInput.count < 8 { pinInput += d }
+        if d == "." {
+            pinInput = ""
+            pinEntryInvalid = true
+        } else if digitAccepted && currentOperator == nil && !pinEntryInvalid {
+            if pinInput.count < 8 { pinInput += d }
+            else {
+                pinInput = ""
+                pinEntryInvalid = true
+            }
+        }
         if let val = Double(currentInput) {
-            display = formatted(val)
+            display = formatted(val) + (currentInput.hasSuffix(".") ? "," : "")
         } else {
             display = currentInput.replacingOccurrences(of: ".", with: ",")
         }
@@ -100,6 +120,7 @@ class CalculatorViewModel: ObservableObject {
 
     private func handleOperator(_ op: String) {
         pinInput = ""
+        pinEntryInvalid = true
         if !currentInput.isEmpty {
             storedValue = Double(currentInput) ?? 0
         }
@@ -111,7 +132,7 @@ class CalculatorViewModel: ObservableObject {
 
     private func handleEquals() {
         let directEntry = currentOperator == nil && lastOperator == nil && !currentInput.isEmpty
-        if directEntry, (try? VaultGate.shared.withAccess { true }) == true {
+        if directEntry && !pinEntryInvalid, (try? VaultGate.shared.withAccess { true }) == true {
             let store = SettingsStore.shared
             if canTryCode && store.kamikazeCodeEnabled && !store.kamikazeCode.isEmpty
                 && store.kamikazeCode != store.mainCode && pinInput == store.kamikazeCode {
@@ -130,6 +151,8 @@ class CalculatorViewModel: ObservableObject {
             if (4...8).contains(pinInput.count) && pinInput.allSatisfy(\.isNumber) {
                 recordFailedCode()
             }
+            pinInput = ""
+            pinEntryInvalid = true
         }
 
         guard let op = currentOperator,
@@ -198,10 +221,12 @@ class CalculatorViewModel: ObservableObject {
         lastOperator = nil
         lastOperand = 0
         pinInput = ""
+        pinEntryInvalid = false
     }
 
     private func toggleSign() {
         pinInput = ""
+        pinEntryInvalid = true
         if let v = Double(currentInput) {
             let toggled = -v
             currentInput = formatResult(toggled)
@@ -211,6 +236,7 @@ class CalculatorViewModel: ObservableObject {
 
     private func handlePercent() {
         pinInput = ""
+        pinEntryInvalid = true
         guard let v = Double(currentInput) else { return }
         let pct: Double
         if let op = currentOperator, (op == "+" || op == "−") {

@@ -59,15 +59,22 @@ final class CameraViewModel: NSObject, ObservableObject {
             guard self.wantsSession else { return }
             guard (try? VaultGate.shared.withAccess(generation: self.ownerGeneration) { true }) == true else { return }
             if !self.configured {
-                let cameras = [
-                    AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back),
-                    AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back),
-                    AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
-                ].compactMap { $0 }
-                // Select the virtual camera first: it switches between ultrawide
-                // and wide lenses without replacing the session input. The active
-                // format's photo dimensions must not choose a different camera.
-                guard let device = cameras.first else {
+                let discovery = AVCaptureDevice.DiscoverySession(
+                    deviceTypes: [.builtInTripleCamera, .builtInDualWideCamera, .builtInWideAngleCamera],
+                    mediaType: .video,
+                    position: .back
+                )
+                // Use one virtual input for a continuous ultrawide-to-wide pinch.
+                let virtualDevices = discovery.devices.filter { candidate in
+                    let types = candidate.constituentDevices.map(\.deviceType)
+                    return types.contains(.builtInUltraWideCamera) && types.contains(.builtInWideAngleCamera)
+                }
+                // 0.5–2× needs only ultrawide and wide. Prefer that virtual
+                // pair over the triple device when both are present.
+                let device = virtualDevices.first(where: { $0.deviceType == .builtInDualWideCamera })
+                    ?? virtualDevices.first(where: { $0.deviceType == .builtInTripleCamera })
+                    ?? discovery.devices.first(where: { $0.deviceType == .builtInWideAngleCamera })
+                guard let device else {
                     self.reportError("Камера недоступна"); return
                 }
                 do {
@@ -86,12 +93,20 @@ final class CameraViewModel: NSObject, ObservableObject {
                     if let dimensions = self.photoDimensions {
                         self.photoOutput.maxPhotoDimensions = dimensions
                     }
-                    let lenses = device.constituentDevices
-                    let firstSwitch = device.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 0
-                    if lenses.contains(where: { $0.deviceType == .builtInUltraWideCamera }),
-                       lenses.contains(where: { $0.deviceType == .builtInWideAngleCamera }),
-                       firstSwitch > 1 {
-                        self.zoomMultiplier = 1 / firstSwitch
+                    let lenses = device.constituentDevices.map(\.deviceType)
+                    if lenses.contains(.builtInUltraWideCamera), lenses.contains(.builtInWideAngleCamera) {
+                        // AVFoundation's device factor can start at 1 on the
+                        // ultrawide lens; use its system display multiplier.
+                        let displayMultiplier: Double
+                        if #available(iOS 18.0, *) {
+                            displayMultiplier = Double(device.displayVideoZoomFactorMultiplier)
+                        } else {
+                            displayMultiplier = 0
+                        }
+                        let firstSwitch = device.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 0
+                        let inferredMultiplier = firstSwitch > 1 ? 1 / firstSwitch : 1
+                        self.zoomMultiplier = (displayMultiplier > 0 && displayMultiplier < 1)
+                            ? displayMultiplier : inferredMultiplier
                     } else {
                         self.zoomMultiplier = 1
                     }
